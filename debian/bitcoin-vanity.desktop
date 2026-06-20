@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Bitcoin Vanity
+GenericName=Bitcoin Vanity Address Generator
+Comment=Generate custom Bitcoin addresses (P2PKH, P2SH, SegWit)
+Exec=btc-vanity-gui
+Icon=bitcoin-vanity
+Terminal=false
+Type=Application
+Categories=Utility;Finance;
+Keywords=crypto;bitcoin;wallet;vanity;btc;segwit;
+StartupWMClass=bitcoin-vanity

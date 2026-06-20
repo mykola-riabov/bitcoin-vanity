@@ -1,0 +1,9 @@
+ecdsa
+base58
+bech32
+mnemonic
+pycryptodome
+PySide6>=6.5
+requests
+tqdm
+pytest

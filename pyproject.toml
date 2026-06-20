@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitcoin-vanity"
+version = "0.3.1"
+description = "CPU vanity address generator for Bitcoin (P2PKH, P2SH, SegWit)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ecdsa",
+    "base58",
+    "bech32",
+    "mnemonic",
+    "pycryptodome",
+    "PySide6>=6.5",
+    "requests",
+    "tqdm",
+]
+
+[project.scripts]
+btc-vanity = "main:main"
+btc-scan = "scan:main"
+btc-vanity-gui = "gui.app:main"
+
+[tool.setuptools]
+py-modules = ["bitcoin_address", "main", "scan", "scanner", "bip32_pure", "workspace"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

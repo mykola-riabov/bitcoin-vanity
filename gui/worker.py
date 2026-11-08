@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import signal
 import sys
 import time
 from dataclasses import dataclass, asdict
@@ -19,16 +20,16 @@ from bitcoin_address import (  # noqa: E402
     ALLOWED_STRENGTHS,
     DEFAULT_PATHS,
     AddressType,
-    check_key_indexed,
     estimate_difficulty,
-    generate_keys_batch,
+    make_matcher,
     privkey_to_wif,
-    try_match_privkey,
     validate_pattern,
 )
+import secp  # noqa: E402
+from search_engine import Job, SearchEngine, default_workers  # noqa: E402
 
 OUTPUT_MODE = 0o600
-_PROGRESS_EVERY = 2_000
+_PROGRESS_INTERVAL_S = 0.5
 _DETAIL_FOUND_LIMIT = 100
 
 
@@ -42,14 +43,6 @@ def _worker_mp_context() -> mp.context.BaseContext:
     return mp.get_context("spawn")
 
 
-def _pool_mp_context() -> mp.context.BaseContext:
-    if sys.platform == "linux":
-        try:
-            return mp.get_context("fork")
-        except ValueError:
-            pass
-    return mp.get_context("spawn")
-
 
 @dataclass
 class SearchConfig:
@@ -57,16 +50,22 @@ class SearchConfig:
     suffix: str = ""
     address_type: AddressType = "p2pkh"
     testnet: bool = False
-    batch: int = 10_000
+    batch: int = 500
     count: int = 1
     strength: int = 256
     mnemonic: bool = False
+    index_search: bool = False
     path: str = "m/44'/0'/0'/0/0"
     output: str = "btc_addrs.jsonl"
     no_private_key: bool = False
-    pool: bool = False
-    pool_workers: int = 2
+    workers: int = default_workers()
     per_file: int = 0
+
+    @property
+    def mode(self) -> str:
+        if not self.mnemonic:
+            return "key"
+        return "index" if self.index_search else "mnemonic"
 
 
 def _split_output_name(path: str) -> str:
@@ -95,6 +94,7 @@ def _build_record(
     include_secrets: bool,
     testnet: bool,
     address_type: AddressType,
+    path: str | None = None,
 ) -> dict[str, Any]:
     rec: dict[str, Any] = {"address": addr, "address_type": address_type}
     if include_secrets:
@@ -102,10 +102,18 @@ def _build_record(
         rec["wif"] = privkey_to_wif(priv, testnet=testnet)
         if mnemonic:
             rec["mnemonic"] = mnemonic
+    if path:
+        rec["path"] = path
     return rec
 
 
+def _exit_on_sigterm(signum: int, frame: Any) -> None:
+    raise SystemExit(0)
+
+
 def run_search(config: SearchConfig, msg_queue: mp.Queue, stop_event: mp.Event) -> None:
+    # A terminate() from the GUI must still run the finally blocks that stop the workers.
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     try:
         validate_pattern(
             config.prefix,
@@ -133,17 +141,18 @@ def run_search(config: SearchConfig, msg_queue: mp.Queue, stop_event: mp.Event) 
             "address_type": config.address_type,
             "testnet": config.testnet,
             "difficulty": asdict(diff),
+            "workers": config.workers,
+            "mode": config.mode,
+            "backend": secp.BACKEND,
         }
     )
 
     out_root = _split_output_name(config.output)
     include_secrets = not config.no_private_key
-    pool_args = (config.prefix, config.suffix, config.address_type, config.testnet)
 
     attempts = 0
     found_count = 0
     start = time.time()
-    last_progress_at = 0
     current_part = 1
     written_in_part = 0
     current_path = _part_path(out_root, current_part, config.per_file)
@@ -203,79 +212,28 @@ def run_search(config: SearchConfig, msg_queue: mp.Queue, stop_event: mp.Event) 
             maybe_emit_found_progress(force=found_count >= config.count)
         return rotate_if_needed(out_f)
 
-    def emit_progress(*, force: bool = False, attempt_count: int | None = None) -> None:
-        nonlocal last_progress_at
-        current = attempt_count if attempt_count is not None else attempts
-        if not force and current - last_progress_at < _PROGRESS_EVERY:
-            return
-        last_progress_at = current
+    def emit_progress() -> None:
         elapsed = time.time() - start
-        speed = current / elapsed if elapsed > 0 else 0.0
+        speed = attempts / elapsed if elapsed > 0 else 0.0
         msg_queue.put(
             {
                 "type": "progress",
-                "attempts": current,
+                "attempts": attempts,
                 "speed": speed,
                 "found": found_count,
                 "target": config.count,
             }
         )
 
-    def process_batch(out_f, keys: list[bytes], mnemonics: list[str] | None, pool: mp.Pool | None) -> tuple[Any, bool]:
-        nonlocal attempts
-
-        if pool is not None:
-            work = [(i, k, *pool_args) for i, k in enumerate(keys)]
-            checked_in_batch = 0
-            for idx, addr in pool.imap_unordered(check_key_indexed, work, chunksize=256):
-                if stop_event.is_set():
-                    return out_f, True
-                checked_in_batch += 1
-                if checked_in_batch % _PROGRESS_EVERY == 0:
-                    emit_progress(force=True, attempt_count=attempts + checked_in_batch)
-                if not addr:
-                    continue
-                rec = _build_record(
-                    addr,
-                    keys[idx],
-                    mnemonics[idx] if mnemonics else None,
-                    include_secrets=include_secrets,
-                    testnet=config.testnet,
-                    address_type=config.address_type,
-                )
-                out_f = write_match(out_f, rec)
-                if found_count >= config.count:
-                    return out_f, True
-            return out_f, stop_event.is_set()
-
-        for idx, priv in enumerate(keys):
-            if stop_event.is_set():
-                return out_f, True
-            addr = try_match_privkey(
-                priv,
-                config.prefix,
-                config.suffix,
-                address_type=config.address_type,
-                testnet=config.testnet,
-            )
-            if idx and idx % _PROGRESS_EVERY == 0:
-                emit_progress(force=True, attempt_count=attempts + idx + 1)
-            if not addr:
-                continue
-            rec = _build_record(
-                addr,
-                priv,
-                mnemonics[idx] if mnemonics else None,
-                include_secrets=include_secrets,
-                testnet=config.testnet,
-                address_type=config.address_type,
-            )
-            out_f = write_match(out_f, rec)
-            if found_count >= config.count:
-                return out_f, True
-        return out_f, stop_event.is_set()
-
+    engine: SearchEngine | None = None
     try:
+        job = Job(
+            matcher=make_matcher(config.prefix, config.suffix, address_type=config.address_type, testnet=config.testnet),
+            mode=config.mode,
+            strength=config.strength,
+            path=config.path or DEFAULT_PATHS[config.address_type],
+            report_every=config.batch,
+        )
         os.makedirs(os.path.dirname(current_path) or ".", exist_ok=True)
         out_f = open(current_path, "a", encoding="utf-8")
         _secure_chmod(current_path)
@@ -288,27 +246,34 @@ def run_search(config: SearchConfig, msg_queue: mp.Queue, stop_event: mp.Event) 
             }
         )
 
-        pool_ctx = _pool_mp_context().Pool(processes=config.pool_workers) if config.pool else None
-        derivation_path = config.path or DEFAULT_PATHS[config.address_type]
         try:
+            engine = SearchEngine(job, config.workers).start()
+            start = time.time()
+            last_progress = start
             while found_count < config.count and not stop_event.is_set():
-                keys, mnemonics = generate_keys_batch(
-                    config.batch,
-                    config.strength,
-                    mnemonic=config.mnemonic,
-                    derivation_path=derivation_path,
-                )
-                attempts += len(keys)
-
-                out_f, stop = process_batch(out_f, keys, mnemonics, pool_ctx)
-                if stop:
-                    break
-
-                emit_progress(force=True)
+                found = engine.next_match(timeout=0.1)
+                attempts = engine.attempts
+                if found:
+                    rec = _build_record(
+                        found["address"],
+                        bytes.fromhex(found["private_key"]),
+                        found.get("mnemonic"),
+                        include_secrets=include_secrets,
+                        testnet=config.testnet,
+                        address_type=config.address_type,
+                        path=found.get("path"),
+                    )
+                    out_f = write_match(out_f, rec)
+                elif not engine.alive():
+                    raise RuntimeError("all search workers exited unexpectedly")
+                now = time.time()
+                if now - last_progress >= _PROGRESS_INTERVAL_S:
+                    emit_progress()
+                    last_progress = now
         finally:
-            if pool_ctx is not None:
-                pool_ctx.close()
-                pool_ctx.join()
+            if engine is not None:
+                engine.stop()
+                attempts = engine.attempts
             out_f.flush()
             out_f.close()
 

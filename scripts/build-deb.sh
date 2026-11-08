@@ -74,6 +74,7 @@ Section: utils
 Priority: optional
 Architecture: ${ARCH}
 Depends: python3 (>= 3.10), libxcb-cursor0
+Recommends: libsecp256k1-6 | libsecp256k1-2 | libsecp256k1-1 | libsecp256k1-0
 Maintainer: ${MAINTAINER}
 Homepage: https://github.com/mykola-riabov/bitcoin-vanity
 Description: Bitcoin vanity address generator (CPU)

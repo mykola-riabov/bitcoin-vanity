@@ -7,13 +7,17 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
+from functools import partial
+from typing import Callable
+
 import base58
-import ecdsa
 from bech32 import encode as bech32_segwit_encode
-from bip32_pure import BIP32
+from bip32_pure import BIP32, parse_path
 from mnemonic import Mnemonic
 
-VERSION = "0.3.1"
+import secp
+
+VERSION = "0.4.0"
 HARDENED_OFFSET = 0x80000000
 ALLOWED_STRENGTHS = [128, 160, 192, 224, 256]
 AddressType = Literal["p2pkh", "p2sh", "p2wpkh"]
@@ -37,7 +41,7 @@ _TESTNET_P2SH = 0xC4
 _WIF_MAINNET = 0x80
 _WIF_TESTNET = 0xEF
 
-_CURVE_ORDER = ecdsa.SECP256k1.order
+_CURVE_ORDER = secp.CURVE_ORDER
 _MNEMO = Mnemonic("english")
 
 
@@ -134,9 +138,7 @@ def validate_pattern(
 
 
 def _compressed_pubkey(priv_bytes: bytes) -> bytes:
-    sk = ecdsa.SigningKey.from_string(priv_bytes, curve=ecdsa.SECP256k1)
-    pub_raw = sk.get_verifying_key().to_string()
-    return (b"\x02" + pub_raw[:32]) if (pub_raw[-1] % 2 == 0) else (b"\x03" + pub_raw[:32])
+    return secp.pubkey_compressed(priv_bytes)
 
 
 def _pubkey_hash(priv_bytes: bytes) -> bytes:
@@ -269,9 +271,7 @@ def mnemonic_to_privkey(strength_bits: int, derivation_path: str) -> tuple[bytes
     words = _MNEMO.to_mnemonic(entropy_bytes)
     seed = _MNEMO.to_seed(words)
     bip32 = BIP32.from_seed(seed)
-    path = derivation_path.lstrip("m/").split("/")
-    path = [int(p.replace("'", "")) + HARDENED_OFFSET if "'" in p else int(p) for p in path]
-    return bip32.get_privkey_from_path(path), words
+    return bip32.get_privkey_from_path(parse_path(derivation_path)), words
 
 
 def generate_keys_batch(
@@ -298,4 +298,17 @@ def check_key_indexed(
     idx, priv_bytes, prefix, suffix, address_type, testnet = item
     return idx, try_match_privkey(
         priv_bytes, prefix, suffix, address_type=address_type, testnet=testnet
+    )
+
+
+def make_matcher(
+    prefix: str,
+    suffix: str,
+    *,
+    address_type: AddressType,
+    testnet: bool = False,
+) -> Callable[[bytes], str | None]:
+    """Picklable `priv -> address or None` for the search engine."""
+    return partial(
+        try_match_privkey, prefix=prefix, suffix=suffix, address_type=address_type, testnet=testnet
     )

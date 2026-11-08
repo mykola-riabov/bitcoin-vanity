@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bitcoin-vanity"
-version = "0.3.1"
+version = "0.4.0"
 description = "CPU vanity address generator for Bitcoin (P2PKH, P2SH, SegWit)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,7 @@ btc-scan = "scan:main"
 btc-vanity-gui = "gui.app:main"
 
 [tool.setuptools]
-py-modules = ["bitcoin_address", "main", "scan", "scanner", "bip32_pure", "workspace"]
+py-modules = ["bitcoin_address", "main", "scan", "scanner", "bip32_pure", "workspace", "secp", "search_engine"]
 
 [tool.setuptools.packages.find]
 where = ["."]
